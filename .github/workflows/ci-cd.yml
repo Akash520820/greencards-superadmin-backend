@@ -6,9 +6,13 @@ on:
   pull_request:
     branches: [ main, master ]
 
+concurrency:
+  group: "backend-${{ github.ref }}"
+  cancel-in-progress: true
+
 jobs:
   test-and-lint:
-    name: Run Tests & Build Check
+    name: Run Tests & Verification
     runs-on: ubuntu-latest
 
     steps:
