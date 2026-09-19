@@ -9,7 +9,8 @@ const errorHandler = require("./shared/middleware/errorHandler.middleware");
 const { apiLimiter } = require("./shared/middleware/rateLimiter.middleware");
 
 const superAdminRouter = require("./routes/superAdmin.routes");
-const staffRouter = require("./routes/staff.routes");
+const staffRouter      = require("./routes/staff.routes");
+const { receiveAuditEvent } = require("./controllers/auditEvent.controller");
 
 const app = express();
 
@@ -23,7 +24,11 @@ app.use(apiLimiter);
 
 // SuperAdmin Microservice Routes
 app.use("/api/v1/superadmin", superAdminRouter);
-app.use("/api/v1/staff", staffRouter);
+app.use("/api/v1/staff",      staffRouter);
+
+// Internal endpoint — receives audit events from all other microservices.
+// NOT exposed through the API gateway — service-to-service only.
+app.post("/internal/audit", receiveAuditEvent);
 
 app.use(notFound);
 app.use(errorHandler);

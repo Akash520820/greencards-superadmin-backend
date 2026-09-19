@@ -1,46 +1,83 @@
 const mongoose = require("mongoose");
 
-// Append-only log of every sensitive staff action. Nothing in this app
-// ever updates or deletes an AuditLog document — see auditLog.util.js,
-// which is the only code path that writes to this collection.
+// ─── Append-Only Audit Log ────────────────────────────────────────────────────
+// This collection lives on the greencard-superadmin Atlas cluster — completely
+// isolated from all other clusters.
+//
+// Security guarantees:
+//   1. Even if an attacker fully compromises the greencard-user or
+//      greencard-seller cluster, they have NO network path to this cluster.
+//   2. The MongoDB collection validation rule (set in Atlas UI) rejects any
+//      update or delete at the database engine level.
+//   3. The pre-hooks below enforce the same rule at the Mongoose/application
+//      level as a second line of defense.
+//   4. The svc_superadmin Atlas DB user only has readWrite on superadmin_db —
+//      it cannot drop collections or modify validation rules.
 const auditLogSchema = new mongoose.Schema(
   {
-    actorId: {
-      type: mongoose.Schema.Types.ObjectId,
-      ref: "Staff",
-      index: true,
-      // not required — a blocked/unauthenticated attempt (e.g. ip.blocked)
-      // has no verified actor to attribute yet
-    },
-    actorEmail: {
-      type: String, // denormalized snapshot — stays readable even if the Staff doc is later removed
-      default: "unknown",
-    },
+    // What happened — use dot-notation strings for easy querying
+    // e.g. "staff.login", "order.integrity_failure", "stock.reserved"
     action: {
-      type: String,
+      type:     String,
       required: true,
+      index:    true,
+    },
+
+    // Who performed the action — publicId (usr_, stf_, sel_ prefix string)
+    // not required because blocked/unauthenticated events have no verified actor
+    performedBy: {
+      type:  String,
       index: true,
-      // e.g. "staff.login", "staff.login_failed", "role.promote",
-      // "permission.update", "access_request.create", "access_request.approve",
-      // "seller.approve", "seller.reject", "bank.verify", "review.hide", "ip.blocked"
     },
-    targetType: {
-      type: String, // "Staff" | "User" | "SellerProfile" | "Review" | "AccessRequest" | etc.
+
+    // What entity was affected
+    targetEntity: { type: String },  // e.g. "order", "user", "product", "staff"
+    targetId:     { type: String },  // publicId of the affected entity
+
+    severity: {
+      type:    String,
+      enum:    ["INFO", "WARNING", "CRITICAL"],
+      default: "INFO",
+      index:   true,
     },
-    targetId: {
-      type: mongoose.Schema.Types.ObjectId,
-    },
+
+    // Arbitrary structured context — JSON-serializable
     metadata: {
-      type: mongoose.Schema.Types.Mixed,
+      type:    mongoose.Schema.Types.Mixed,
       default: {},
     },
-    ipAddress: {
-      type: String,
-    },
+
+    ipAddress: { type: String },
+    userAgent: { type: String },
   },
   { timestamps: true }
 );
 
 auditLogSchema.index({ createdAt: -1 });
+auditLogSchema.index({ severity: 1, createdAt: -1 });
+
+// ─── Append-Only Enforcement (Mongoose layer) ────────────────────────────────
+// These pre-hooks throw if any mutation operation is attempted.
+// Combined with the MongoDB Atlas collection validation rule, this gives
+// two independent layers of append-only enforcement.
+const BLOCKED_OPS = [
+  "updateOne",
+  "updateMany",
+  "findOneAndUpdate",
+  "replaceOne",
+  "deleteOne",
+  "deleteMany",
+  "findOneAndDelete",
+  "findOneAndReplace",
+];
+
+BLOCKED_OPS.forEach((op) => {
+  auditLogSchema.pre(op, function () {
+    throw new Error(
+      `[AuditLog] ${op} is not permitted — audit_logs is append-only. ` +
+        "To correct an error, create a new corrective entry instead."
+    );
+  });
+});
 
 module.exports = mongoose.model("AuditLog", auditLogSchema);
