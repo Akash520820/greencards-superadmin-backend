@@ -3,7 +3,7 @@ const app = require("./app");
 const connectDB = require("./shared/db/index");
 const logger = require("./shared/utils/logger");
 
-const PORT = process.env.SUPERADMIN_SERVICE_PORT || 5004;
+const PORT = process.env.PORT || process.env.SUPERADMIN_SERVICE_PORT || 5004;
 
 connectDB()
   .then(() => {
