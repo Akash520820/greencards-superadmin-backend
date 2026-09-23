@@ -14,6 +14,9 @@ const { receiveAuditEvent } = require("./controllers/auditEvent.controller");
 
 const app = express();
 
+// Trust reverse proxy (Render / API Gateway) for express-rate-limit and X-Forwarded-For
+app.set("trust proxy", 1);
+
 app.use(helmet({ crossOriginResourcePolicy: { policy: "cross-origin" } }));
 app.use(compression());
 app.use(cors({ origin: true, credentials: true }));
