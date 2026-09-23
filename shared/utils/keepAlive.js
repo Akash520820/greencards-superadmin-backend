@@ -11,11 +11,14 @@
 const PING_INTERVAL_MS = 5 * 60 * 1000; // 5 minutes — well under Render's 15-minute sleep window
 const PING_TIMEOUT_MS = 10 * 1000;
 
-const startKeepAlive = () => {
-  const baseUrl = process.env.RENDER_EXTERNAL_URL;
+const startKeepAlive = (serviceName = "greencards-superadmin-backend") => {
+  const baseUrl =
+    process.env.RENDER_EXTERNAL_URL ||
+    (process.env.RENDER_SERVICE_NAME ? `https://${process.env.RENDER_SERVICE_NAME}.onrender.com` : null) ||
+    (process.env.NODE_ENV === "production" ? `https://${serviceName}.onrender.com` : null);
 
   if (!baseUrl) {
-    console.log("Keep-alive: RENDER_EXTERNAL_URL not set, skipping (expected in local dev)");
+    console.log("Keep-alive: No external URL found, skipping (expected in local dev)");
     return;
   }
 
