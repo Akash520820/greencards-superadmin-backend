@@ -119,6 +119,16 @@ staffSchema.methods.hasPermission = function (permission) {
 };
 
 staffSchema.methods.generateAccessToken = function () {
+  const secret =
+    process.env.STAFF_ACCESS_TOKEN_SECRET ||
+    process.env.SUPERADMIN_ACCESS_TOKEN_SECRET ||
+    process.env.ACCESS_TOKEN_SECRET ||
+    "gc_staff_access_token_secret_fallback_key_2026";
+  const expiry =
+    process.env.STAFF_ACCESS_TOKEN_EXPIRY ||
+    process.env.SUPERADMIN_ACCESS_TOKEN_EXPIRY ||
+    process.env.ACCESS_TOKEN_EXPIRY ||
+    "15m";
   return jwt.sign(
     {
       _id: this._id,
@@ -126,14 +136,24 @@ staffSchema.methods.generateAccessToken = function () {
       role: this.role,
       isStaff: true,
     },
-    process.env.STAFF_ACCESS_TOKEN_SECRET,
-    { expiresIn: process.env.STAFF_ACCESS_TOKEN_EXPIRY }
+    secret,
+    { expiresIn: expiry }
   );
 };
 
 staffSchema.methods.generateRefreshToken = function () {
-  return jwt.sign({ _id: this._id, isStaff: true }, process.env.STAFF_REFRESH_TOKEN_SECRET, {
-    expiresIn: process.env.STAFF_REFRESH_TOKEN_EXPIRY,
+  const secret =
+    process.env.STAFF_REFRESH_TOKEN_SECRET ||
+    process.env.SUPERADMIN_REFRESH_TOKEN_SECRET ||
+    process.env.REFRESH_TOKEN_SECRET ||
+    "gc_staff_refresh_token_secret_fallback_key_2026";
+  const expiry =
+    process.env.STAFF_REFRESH_TOKEN_EXPIRY ||
+    process.env.SUPERADMIN_REFRESH_TOKEN_EXPIRY ||
+    process.env.REFRESH_TOKEN_EXPIRY ||
+    "1d";
+  return jwt.sign({ _id: this._id, isStaff: true }, secret, {
+    expiresIn: expiry,
   });
 };
 
