@@ -122,8 +122,7 @@ staffSchema.methods.generateAccessToken = function () {
   const secret =
     process.env.STAFF_ACCESS_TOKEN_SECRET ||
     process.env.SUPERADMIN_ACCESS_TOKEN_SECRET ||
-    process.env.ACCESS_TOKEN_SECRET ||
-    "gc_staff_access_token_secret_fallback_key_2026";
+    process.env.ACCESS_TOKEN_SECRET;
   const expiry =
     process.env.STAFF_ACCESS_TOKEN_EXPIRY ||
     process.env.SUPERADMIN_ACCESS_TOKEN_EXPIRY ||
@@ -145,8 +144,7 @@ staffSchema.methods.generateRefreshToken = function () {
   const secret =
     process.env.STAFF_REFRESH_TOKEN_SECRET ||
     process.env.SUPERADMIN_REFRESH_TOKEN_SECRET ||
-    process.env.REFRESH_TOKEN_SECRET ||
-    "gc_staff_refresh_token_secret_fallback_key_2026";
+    process.env.REFRESH_TOKEN_SECRET;
   const expiry =
     process.env.STAFF_REFRESH_TOKEN_EXPIRY ||
     process.env.SUPERADMIN_REFRESH_TOKEN_EXPIRY ||

@@ -24,8 +24,7 @@ const verifyJWT = asyncHandler(async (req, res, next) => {
   const staffSecret =
     process.env.STAFF_ACCESS_TOKEN_SECRET ||
     process.env.SUPERADMIN_ACCESS_TOKEN_SECRET ||
-    process.env.ACCESS_TOKEN_SECRET ||
-    "gc_staff_access_token_secret_fallback_key_2026";
+    process.env.ACCESS_TOKEN_SECRET;
 
   let staffToken = req.cookies?.staffAccessToken || req.cookies?.adminAccessToken;
   if (!staffToken) {
@@ -107,9 +106,15 @@ const verifyStaffJWT = asyncHandler(async (req, res, next) => {
     throw new ApiError(401, "Staff authentication required");
   }
 
+  // Same chain as verifyJWT — fail-fast validation in server.js guarantees at least one is set
+  const staffSecret =
+    process.env.STAFF_ACCESS_TOKEN_SECRET ||
+    process.env.SUPERADMIN_ACCESS_TOKEN_SECRET ||
+    process.env.ACCESS_TOKEN_SECRET;
+
   let decoded;
   try {
-    decoded = jwt.verify(staffToken, process.env.STAFF_ACCESS_TOKEN_SECRET);
+    decoded = jwt.verify(staffToken, staffSecret);
   } catch (err) {
     throw new ApiError(401, err.name === "TokenExpiredError" ? "Access token expired" : "Invalid access token");
   }

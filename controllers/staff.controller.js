@@ -175,8 +175,7 @@ const refreshStaffAccessToken = asyncHandler(async (req, res) => {
   const refreshSecret =
     process.env.STAFF_REFRESH_TOKEN_SECRET ||
     process.env.SUPERADMIN_REFRESH_TOKEN_SECRET ||
-    process.env.REFRESH_TOKEN_SECRET ||
-    "gc_staff_refresh_token_secret_fallback_key_2026";
+    process.env.REFRESH_TOKEN_SECRET;
   try {
     decoded = jwt.verify(incomingRefreshToken, refreshSecret);
   } catch (err) {
