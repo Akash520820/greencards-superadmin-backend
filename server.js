@@ -3,10 +3,9 @@ const app = require("./app");
 const connectDB = require("./shared/db/index");
 const logger = require("./shared/utils/logger");
 const startKeepAlive = require("./shared/utils/keepAlive");
+const mongoose = require("mongoose");
 
 // ─── Fail-fast: required env vars ────────────────────────────────────────────
-// superadmin-backend uses SUPERADMIN_* naming; the staff.model fallback chain
-// also accepts STAFF_ACCESS_TOKEN_SECRET, but we validate the primary name here.
 const REQUIRED_ENV_VARS = [
   "MONGODB_URI",
   "SUPERADMIN_ACCESS_TOKEN_SECRET",
@@ -23,12 +22,43 @@ const PORT = process.env.PORT || process.env.SUPERADMIN_SERVICE_PORT || 5004;
 
 connectDB()
   .then(() => {
-    app.listen(PORT, () => {
+    // ─── MongoDB reconnect handlers ───────────────────────────────────────────
+    mongoose.connection.on("error", (err) => {
+      logger.error("MongoDB connection error (after startup):", err);
+    });
+    mongoose.connection.on("disconnected", () => {
+      logger.warn("MongoDB disconnected — Mongoose will auto-reconnect");
+    });
+    mongoose.connection.on("reconnected", () => {
+      logger.info("MongoDB reconnected");
+    });
+
+    const server = app.listen(PORT, () => {
       logger.info(`👑 SuperAdmin Microservice running on port ${PORT}`);
       console.log(`👑 SuperAdmin Microservice running on port ${PORT}`);
     });
+
     // Start keep-alive self-pinging on Render
     startKeepAlive();
+
+    // ─── Graceful shutdown ────────────────────────────────────────────────────
+    const shutdown = (signal) => {
+      logger.info(`${signal} received — shutting down gracefully`);
+      server.close(() => {
+        logger.info("HTTP server closed");
+        mongoose.connection.close(false, () => {
+          logger.info("MongoDB connection closed");
+          process.exit(0);
+        });
+      });
+      setTimeout(() => {
+        logger.error("Graceful shutdown timed out — forcing exit");
+        process.exit(1);
+      }, 10_000);
+    };
+
+    process.on("SIGTERM", () => shutdown("SIGTERM"));
+    process.on("SIGINT",  () => shutdown("SIGINT"));
   })
   .catch((err) => {
     logger.error("MongoDB connection failed in SuperAdmin Microservice:", err);
