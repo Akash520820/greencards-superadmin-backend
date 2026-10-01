@@ -6,12 +6,20 @@ const startKeepAlive = require("./shared/utils/keepAlive");
 const mongoose = require("mongoose");
 
 // ─── Fail-fast: required env vars ────────────────────────────────────────────
-const REQUIRED_ENV_VARS = [
-  "MONGODB_URI",
-  "SUPERADMIN_ACCESS_TOKEN_SECRET",
-  "SUPERADMIN_REFRESH_TOKEN_SECRET",
-];
-const missing = REQUIRED_ENV_VARS.filter((v) => !process.env[v]);
+const hasAccessSecret =
+  process.env.SUPERADMIN_ACCESS_TOKEN_SECRET ||
+  process.env.STAFF_ACCESS_TOKEN_SECRET ||
+  process.env.ACCESS_TOKEN_SECRET;
+const hasRefreshSecret =
+  process.env.SUPERADMIN_REFRESH_TOKEN_SECRET ||
+  process.env.STAFF_REFRESH_TOKEN_SECRET ||
+  process.env.REFRESH_TOKEN_SECRET;
+
+const missing = [];
+if (!process.env.MONGODB_URI) missing.push("MONGODB_URI");
+if (!hasAccessSecret) missing.push("SUPERADMIN_ACCESS_TOKEN_SECRET (or STAFF_ACCESS_TOKEN_SECRET)");
+if (!hasRefreshSecret) missing.push("SUPERADMIN_REFRESH_TOKEN_SECRET (or STAFF_REFRESH_TOKEN_SECRET)");
+
 if (missing.length > 0) {
   console.error(`[superadmin-backend] Missing required environment variables: ${missing.join(", ")}`);
   console.error("Set them in your .env file (local) or Render Dashboard (production).");
