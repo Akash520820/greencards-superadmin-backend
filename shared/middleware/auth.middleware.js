@@ -20,19 +20,34 @@ const { logAudit } = require("../utils/auditLog.util");
 // reads req.user._id / req.user.role keeps working unchanged) AND sets
 // req.staff / req.isStaff for code that specifically needs to know it's
 // dealing with a staff session (audit logging, permission checks).
-const verifyJWT = asyncHandler(async (req, res, next) => {
-  const staffSecret =
-    process.env.STAFF_ACCESS_TOKEN_SECRET ||
-    process.env.SUPERADMIN_ACCESS_TOKEN_SECRET ||
-    process.env.ACCESS_TOKEN_SECRET;
+// Helper to verify staff tokens using any configured staff secret.
+const verifyStaffToken = (token) => {
+  const secrets = [
+    process.env.SUPERADMIN_ACCESS_TOKEN_SECRET,
+    process.env.STAFF_ACCESS_TOKEN_SECRET,
+    process.env.ACCESS_TOKEN_SECRET,
+  ].filter(Boolean);
 
+  let lastErr;
+  for (const secret of secrets) {
+    try {
+      return jwt.verify(token, secret);
+    } catch (err) {
+      lastErr = err;
+      if (err.name === "TokenExpiredError") throw err;
+    }
+  }
+  throw lastErr || new ApiError(401, "Invalid access token");
+};
+
+const verifyJWT = asyncHandler(async (req, res, next) => {
   let staffToken = req.cookies?.staffAccessToken || req.cookies?.adminAccessToken;
   if (!staffToken) {
     const authHeader = req.header("Authorization");
     if (authHeader && authHeader.startsWith("Bearer ")) {
       const candidate = authHeader.replace("Bearer ", "").trim();
       try {
-        jwt.verify(candidate, staffSecret);
+        verifyStaffToken(candidate);
         staffToken = candidate;
       } catch (e) {
         // Not a staff token
@@ -45,7 +60,7 @@ const verifyJWT = asyncHandler(async (req, res, next) => {
   if (staffToken) {
     let decoded;
     try {
-      decoded = jwt.verify(staffToken, staffSecret);
+      decoded = verifyStaffToken(staffToken);
     } catch (err) {
       throw new ApiError(401, err.name === "TokenExpiredError" ? "Access token expired" : "Invalid access token");
     }
@@ -106,15 +121,9 @@ const verifyStaffJWT = asyncHandler(async (req, res, next) => {
     throw new ApiError(401, "Staff authentication required");
   }
 
-  // Same chain as verifyJWT — fail-fast validation in server.js guarantees at least one is set
-  const staffSecret =
-    process.env.STAFF_ACCESS_TOKEN_SECRET ||
-    process.env.SUPERADMIN_ACCESS_TOKEN_SECRET ||
-    process.env.ACCESS_TOKEN_SECRET;
-
   let decoded;
   try {
-    decoded = jwt.verify(staffToken, staffSecret);
+    decoded = verifyStaffToken(staffToken);
   } catch (err) {
     throw new ApiError(401, err.name === "TokenExpiredError" ? "Access token expired" : "Invalid access token");
   }
