@@ -1,5 +1,5 @@
 const { z } = require("zod");
-const { objectIdSchema } = require("../validators/order.validators");
+const objectIdSchema = z.string().regex(/^[0-9a-fA-F]{24}$/, "Invalid id");
 const { ALL_PERMISSIONS } = require("../shared/constants/permissions");
 
 const createStaffRequestSchema = z.object({
