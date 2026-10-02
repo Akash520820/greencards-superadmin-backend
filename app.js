@@ -22,7 +22,8 @@ app.use(compression());
 
 // ─── CORS allowlist ───────────────────────────────────────────────────────────
 const ALLOWED_ORIGINS = (
-  process.env.FRONTEND_ORIGINS || "http://localhost:5173,http://localhost:3000"
+  process.env.FRONTEND_ORIGINS ||
+  "https://akash520820.github.io,http://localhost:5173,http://localhost:3000"
 )
   .split(",")
   .map((o) => o.trim())
@@ -31,7 +32,12 @@ const ALLOWED_ORIGINS = (
 app.use(
   cors({
     origin: (origin, callback) => {
-      if (!origin || ALLOWED_ORIGINS.includes(origin)) {
+      if (
+        !origin ||
+        ALLOWED_ORIGINS.includes(origin) ||
+        ALLOWED_ORIGINS.includes(origin.replace(/\/$/, "")) ||
+        origin.endsWith(".github.io")
+      ) {
         callback(null, true);
       } else {
         callback(new Error(`CORS: origin '${origin}' not allowed`));
