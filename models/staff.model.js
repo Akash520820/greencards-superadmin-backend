@@ -74,6 +74,23 @@ const staffSchema = new mongoose.Schema(
       type: String,
       select: false, // TOTP secret — never returned by default
     },
+    // Account lockout & audit tracking
+    failedLoginAttempts: {
+      type: Number,
+      default: 0,
+    },
+    lockUntil: {
+      type: Date,
+      default: null,
+    },
+    mfaLastUsedStep: {
+      type: Number,
+      default: 0,
+    },
+    passwordChangedAt: {
+      type: Date,
+      default: null,
+    },
     createdBy: {
       type: mongoose.Schema.Types.ObjectId,
       ref: "Staff", // which staff member provisioned this account (null only for the bootstrap script)
@@ -97,6 +114,10 @@ const staffSchema = new mongoose.Schema(
   { timestamps: true }
 );
 
+staffSchema.virtual("isLocked").get(function () {
+  return !!(this.lockUntil && this.lockUntil > Date.now());
+});
+
 staffSchema.pre("save", async function () {
   if (this.isNew && !this.employeeId) {
     const count = await mongoose.model("Staff").countDocuments();
@@ -105,7 +126,7 @@ staffSchema.pre("save", async function () {
 
   if (!this.isModified("password")) return;
   if (this.$locals.skipPasswordHash) return;
-  this.password = await bcrypt.hash(this.password, 10);
+  this.password = await bcrypt.hash(this.password, 12);
 });
 
 staffSchema.methods.isPasswordCorrect = async function (password) {
@@ -118,39 +139,30 @@ staffSchema.methods.hasPermission = function (permission) {
   return this.permissions.includes(permission);
 };
 
-staffSchema.methods.generateAccessToken = function () {
-  const secret =
-    process.env.STAFF_ACCESS_TOKEN_SECRET ||
-    process.env.SUPERADMIN_ACCESS_TOKEN_SECRET ||
-    process.env.ACCESS_TOKEN_SECRET;
-  const expiry =
-    process.env.STAFF_ACCESS_TOKEN_EXPIRY ||
-    process.env.SUPERADMIN_ACCESS_TOKEN_EXPIRY ||
-    process.env.ACCESS_TOKEN_EXPIRY ||
-    "15m";
-  return jwt.sign(
-    {
-      _id: this._id,
-      companyEmail: this.companyEmail,
-      role: this.role,
-      isStaff: true,
-    },
-    secret,
-    { expiresIn: expiry }
-  );
+const { signStaffAccessToken } = require("../shared/utils/jwtKeys");
+
+staffSchema.methods.generateAccessToken = function (extraClaims = {}) {
+  const claims = {
+    _id: this._id,
+    companyEmail: this.companyEmail,
+    role: this.role,
+    isStaff: true,
+    ...extraClaims,
+  };
+  return signStaffAccessToken(claims);
 };
 
-staffSchema.methods.generateRefreshToken = function () {
+staffSchema.methods.generateRefreshToken = function (extraClaims = {}) {
   const secret =
-    process.env.STAFF_REFRESH_TOKEN_SECRET ||
     process.env.SUPERADMIN_REFRESH_TOKEN_SECRET ||
+    process.env.STAFF_REFRESH_TOKEN_SECRET ||
     process.env.REFRESH_TOKEN_SECRET;
   const expiry =
-    process.env.STAFF_REFRESH_TOKEN_EXPIRY ||
     process.env.SUPERADMIN_REFRESH_TOKEN_EXPIRY ||
+    process.env.STAFF_REFRESH_TOKEN_EXPIRY ||
     process.env.REFRESH_TOKEN_EXPIRY ||
     "1d";
-  return jwt.sign({ _id: this._id, isStaff: true }, secret, {
+  return jwt.sign({ _id: this._id, isStaff: true, ...extraClaims }, secret, {
     expiresIn: expiry,
   });
 };

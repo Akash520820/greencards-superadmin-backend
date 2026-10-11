@@ -112,9 +112,6 @@ const reviewAccessRequest = asyncHandler(async (req, res) => {
   accessRequest.status = "approved";
   accessRequest.resolvedAt = new Date();
   accessRequest.resultingStaffId = result.staff._id;
-  if (result.tempPassword) {
-    accessRequest.generatedTempPassword = result.tempPassword;
-  }
   await accessRequest.save();
 
   const responseData = accessRequest.toObject();
@@ -128,7 +125,9 @@ const reviewAccessRequest = asyncHandler(async (req, res) => {
 
 const resolveApprovedRequest = async (accessRequest, req) => {
   if (accessRequest.type === "create_staff") {
-    const tempPassword = crypto.randomBytes(9).toString("base64url"); // 12-char random password, shared out-of-band by whoever created the account
+    // 24-char high-entropy temporary password matching strongPassword validator
+    const tempPassword =
+      crypto.randomBytes(18).toString("base64url") + "A1!";
     const staff = await Staff.create({
       fullName: accessRequest.targetFullName,
       companyEmail: accessRequest.targetEmail,

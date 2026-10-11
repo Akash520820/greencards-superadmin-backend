@@ -10,6 +10,7 @@ const {
   getCurrentStaff,
   changeStaffPassword,
   getAllStaff,
+  createAdminDirect,
   updateStaffPermissions,
   toggleStaffActive,
   getAuditLogs,
@@ -27,8 +28,10 @@ const {
   staffLoginSchema,
   staffMfaLoginSchema,
   mfaVerifySetupSchema,
+  disableMfaSchema,
   updatePermissionsSchema,
   changeStaffPasswordSchema,
+  createAdminSchema,
   staffIdParamSchema,
 } = require("../validators/staff.validators");
 const {
@@ -58,10 +61,13 @@ router.route("/change-password").post(validate({ body: changeStaffPasswordSchema
 
 router.route("/mfa/setup").post(setupMfa);
 router.route("/mfa/verify-setup").post(validate({ body: mfaVerifySetupSchema }), verifyMfaSetup);
-router.route("/mfa/disable").post(disableMfa);
+router.route("/mfa/disable").post(validate({ body: disableMfaSchema }), disableMfa);
 
 // ---- Staff management — superadmin only ----
-router.route("/").get(verifySuperAdmin, getAllStaff);
+router
+  .route("/")
+  .get(verifySuperAdmin, getAllStaff)
+  .post(verifySuperAdmin, validate({ body: createAdminSchema }), createAdminDirect);
 router
   .route("/:staffId/permissions")
   .patch(

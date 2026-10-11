@@ -1,4 +1,3 @@
-const jwt = require("jsonwebtoken");
 const asyncHandler = require("../utils/asyncHandler");
 const ApiError = require("../utils/ApiError");
 const User = require("../../models/user.model");
@@ -9,35 +8,30 @@ const { logAudit } = require("../utils/auditLog.util");
 // verifyJWT — now aware of TWO completely separate identity systems:
 //
 //   1. Customer/seller accounts (User collection, "accessToken" cookie,
-//      signed with ACCESS_TOKEN_SECRET)
+//      ES256, signed by user-backend's CUSTOMER private key)
 //   2. Staff accounts (Staff collection, "staffAccessToken" cookie,
-//      signed with STAFF_ACCESS_TOKEN_SECRET — a completely different
-//      secret, so a customer token is cryptographically incapable of
-//      passing as a staff token, not just "checked and rejected")
+//      ES256, signed by superadmin-backend's STAFF private key — a
+//      completely different key pair AND issuer, so a customer token is
+//      cryptographically incapable of passing as a staff token)
 //
 // It checks for the staff cookie first. Whichever one is found, it sets
 // req.user to the resulting document (so every existing controller that
 // reads req.user._id / req.user.role keeps working unchanged) AND sets
 // req.staff / req.isStaff for code that specifically needs to know it's
 // dealing with a staff session (audit logging, permission checks).
-// Helper to verify staff tokens using any configured staff secret.
-const verifyStaffToken = (token) => {
-  const secrets = [
-    process.env.SUPERADMIN_ACCESS_TOKEN_SECRET,
-    process.env.STAFF_ACCESS_TOKEN_SECRET,
-    process.env.ACCESS_TOKEN_SECRET,
-  ].filter(Boolean);
+const { verifyStaffAccessToken, verifyCustomerAccessToken } = require("../utils/jwtKeys");
 
-  let lastErr;
-  for (const secret of secrets) {
-    try {
-      return jwt.verify(token, secret);
-    } catch (err) {
-      lastErr = err;
-      if (err.name === "TokenExpiredError") throw err;
-    }
+// ES256 only. Staff tokens are verified with the STAFF *public* key and
+// customer/seller tokens with the CUSTOMER *public* key, so this service can
+// read sessions but can never mint one. No shared secrets, no secret fallback
+// chain, no algorithm negotiation (see utils/jwtKeys.js).
+const verifyStaffToken = (token) => verifyStaffAccessToken(token);
+
+// Password change / reset revokes every session issued before it.
+const rejectIfSessionPredatesPasswordChange = (staff, decoded) => {
+  if (staff.passwordChangedAt && decoded.iat * 1000 < staff.passwordChangedAt.getTime()) {
+    throw new ApiError(401, "Session expired — please sign in again");
   }
-  throw lastErr || new ApiError(401, "Invalid access token");
 };
 
 const verifyJWT = asyncHandler(async (req, res, next) => {
@@ -72,11 +66,13 @@ const verifyJWT = asyncHandler(async (req, res, next) => {
       throw new ApiError(403, "Your staff account has been deactivated");
     }
 
+    rejectIfSessionPredatesPasswordChange(staff, decoded);
     await applyJitExpiry(staff);
 
     req.user = staff;
     req.staff = staff;
     req.isStaff = true;
+    req.tokenClaims = decoded;
     return next();
   }
 
@@ -86,7 +82,7 @@ const verifyJWT = asyncHandler(async (req, res, next) => {
 
   let decoded;
   try {
-    decoded = jwt.verify(customerToken, process.env.ACCESS_TOKEN_SECRET);
+    decoded = verifyCustomerAccessToken(customerToken);
   } catch (err) {
     throw new ApiError(401, err.name === "TokenExpiredError" ? "Access token expired" : "Invalid access token");
   }
@@ -135,26 +131,35 @@ const verifyStaffJWT = asyncHandler(async (req, res, next) => {
     throw new ApiError(403, "Your staff account has been deactivated");
   }
 
+  rejectIfSessionPredatesPasswordChange(staff, decoded);
   await applyJitExpiry(staff);
 
   req.user = staff;
   req.staff = staff;
   req.isStaff = true;
+  req.tokenClaims = decoded;
   next();
 });
 
-// Just-in-time elevation (Phase 6): if a temporary elevation window has
-// passed, revert the role automatically before the request proceeds, and
-// persist that reversion so it's reflected in the DB immediately, not
-// just for this one request.
+// Just-in-time elevation & time-limited admin access:
+// If a temporary elevation window or time-limited access has passed:
+// - If previousRole exists (e.g. elevated user/admin), revert to previousRole.
+// - If no previousRole (e.g. direct time-limited admin), deactivate the account.
 const applyJitExpiry = async (staff) => {
-  if (staff.roleExpiresAt && staff.roleExpiresAt < new Date() && staff.previousRole) {
-    const revertedFrom = staff.role;
-    staff.role = staff.previousRole;
-    staff.previousRole = null;
-    staff.roleExpiresAt = null;
-    await staff.save({ validateBeforeSave: false });
-    await logAudit(staff, "role.jit_expired", { type: "Staff", id: staff._id }, { revertedFrom, revertedTo: staff.role });
+  if (staff.roleExpiresAt && staff.roleExpiresAt < new Date()) {
+    if (staff.previousRole) {
+      const revertedFrom = staff.role;
+      staff.role = staff.previousRole;
+      staff.previousRole = null;
+      staff.roleExpiresAt = null;
+      await staff.save({ validateBeforeSave: false });
+      await logAudit(staff, "role.jit_expired", { type: "Staff", id: staff._id }, { revertedFrom, revertedTo: staff.role });
+    } else {
+      staff.isActive = false;
+      await staff.save({ validateBeforeSave: false });
+      await logAudit(staff, "staff.account_expired", { type: "Staff", id: staff._id }, { expiredAt: staff.roleExpiresAt });
+      throw new ApiError(403, "Your admin access duration has expired. Please contact a superadmin.");
+    }
   }
 };
 
@@ -172,6 +177,9 @@ const verifySuperAdmin = asyncHandler(async (req, res, next) => {
   if (req.user?.role !== "superadmin") {
     throw new ApiError(403, "Access denied — super admin only");
   }
+  if (process.env.REQUIRE_SUPERADMIN_MFA === "true" && req.tokenClaims && req.tokenClaims.mfa !== true) {
+    throw new ApiError(403, "MFA verification required for superadmin actions");
+  }
   next();
 });
 
@@ -182,6 +190,9 @@ const verifyPermission = (permission) =>
   asyncHandler(async (req, res, next) => {
     if (!req.isStaff || typeof req.user?.hasPermission !== "function") {
       throw new ApiError(403, "Access denied — staff only");
+    }
+    if (req.user.role === "superadmin" && process.env.REQUIRE_SUPERADMIN_MFA === "true" && req.tokenClaims && req.tokenClaims.mfa !== true) {
+      throw new ApiError(403, "MFA verification required for superadmin actions");
     }
     if (!req.user.hasPermission(permission)) {
       throw new ApiError(403, `Access denied — missing permission: ${permission}`);

@@ -6,19 +6,18 @@ const startKeepAlive = require("./shared/utils/keepAlive");
 const mongoose = require("mongoose");
 
 // ─── Fail-fast: required env vars ────────────────────────────────────────────
-const hasAccessSecret =
-  process.env.SUPERADMIN_ACCESS_TOKEN_SECRET ||
-  process.env.STAFF_ACCESS_TOKEN_SECRET ||
-  process.env.ACCESS_TOKEN_SECRET;
-const hasRefreshSecret =
-  process.env.SUPERADMIN_REFRESH_TOKEN_SECRET ||
-  process.env.STAFF_REFRESH_TOKEN_SECRET ||
-  process.env.REFRESH_TOKEN_SECRET;
+const { assertJwtConfig } = require("./shared/utils/jwtKeys");
+assertJwtConfig();
 
 const missing = [];
 if (!process.env.MONGODB_URI) missing.push("MONGODB_URI");
-if (!hasAccessSecret) missing.push("SUPERADMIN_ACCESS_TOKEN_SECRET (or STAFF_ACCESS_TOKEN_SECRET)");
-if (!hasRefreshSecret) missing.push("SUPERADMIN_REFRESH_TOKEN_SECRET (or STAFF_REFRESH_TOKEN_SECRET)");
+if (
+  !process.env.SUPERADMIN_REFRESH_TOKEN_SECRET &&
+  !process.env.STAFF_REFRESH_TOKEN_SECRET &&
+  !process.env.REFRESH_TOKEN_SECRET
+) {
+  missing.push("SUPERADMIN_REFRESH_TOKEN_SECRET");
+}
 
 if (missing.length > 0) {
   console.error(`[superadmin-backend] Missing required environment variables: ${missing.join(", ")}`);

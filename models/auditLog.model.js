@@ -29,9 +29,19 @@ const auditLogSchema = new mongoose.Schema(
       type:  String,
       index: true,
     },
+    actorId: {
+      type: mongoose.Schema.Types.ObjectId,
+      ref: "Staff",
+      index: true,
+    },
+    actorEmail: {
+      type: String,
+      index: true,
+    },
 
     // What entity was affected
     targetEntity: { type: String },  // e.g. "order", "user", "product", "staff"
+    targetType:   { type: String },
     targetId:     { type: String },  // publicId of the affected entity
 
     severity: {
