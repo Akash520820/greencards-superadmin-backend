@@ -31,38 +31,14 @@ const staffRefreshCookieOptions = { ...baseStaffCookieOptions, maxAge: 24 * 60 *
 const MAX_FAILED_ATTEMPTS = 5;
 const LOCKOUT_DURATION_MS = 15 * 60 * 1000; // 15 minutes
 
-const DUMMY_HASH = "$2b$12$e8sV1gXq/8xW5G7H6Z3J2.uY9uUq9nJ6hG6ZqL3a6mR9jM1oU9YXe";
+const DUMMY_HASH = bcrypt.hashSync("greencards-timing-equaliser", 12);
 
-const recordFailedLogin = async (staff, req, reason) => {
-  if (!staff) return;
-  staff.failedLoginAttempts = (staff.failedLoginAttempts || 0) + 1;
-  const reachedLockout = staff.failedLoginAttempts >= MAX_FAILED_ATTEMPTS;
-  if (reachedLockout) {
-    staff.lockUntil = new Date(Date.now() + LOCKOUT_DURATION_MS);
-  }
-  await staff.save({ validateBeforeSave: false });
+authenticator.options = { window: 1 }; // ±30s clock skew
 
-  await logAudit(
-    staff,
-    reachedLockout ? "staff.account_locked" : "staff.login_failed",
-    { type: "Staff", id: staff._id },
-    { reason, failedAttempts: staff.failedLoginAttempts, lockUntil: staff.lockUntil },
-    req
-  );
-};
-
-const resetFailedAttempts = async (staff) => {
-  if (staff.failedLoginAttempts > 0 || staff.lockUntil) {
-    staff.failedLoginAttempts = 0;
-    staff.lockUntil = null;
-    await staff.save({ validateBeforeSave: false });
-  }
-};
-
-const generateStaffTokens = async (staffId, extraClaims = {}) => {
+const generateStaffTokens = async (staffId, { mfa = false } = {}) => {
   const staff = await Staff.findById(staffId);
-  const accessToken = staff.generateAccessToken(extraClaims);
-  const refreshToken = staff.generateRefreshToken(extraClaims);
+  const accessToken = staff.generateAccessToken({ mfa });
+  const refreshToken = staff.generateRefreshToken({ mfa });
 
   staff.refreshToken = refreshToken;
   await staff.save({ validateBeforeSave: false });
@@ -70,41 +46,107 @@ const generateStaffTokens = async (staffId, extraClaims = {}) => {
   return { accessToken, refreshToken };
 };
 
+const registerFailure = async (staff, req, reason) => {
+  const updated = await Staff.findByIdAndUpdate(
+    staff._id,
+    { $inc: { failedLoginAttempts: 1 } },
+    { new: true }
+  );
+  await logAudit(
+    staff,
+    "staff.login_failed",
+    { type: "Staff", id: staff._id },
+    { reason, attempts: updated?.failedLoginAttempts || 1 },
+    req
+  );
+  if (updated && updated.failedLoginAttempts >= MAX_FAILED_ATTEMPTS) {
+    await Staff.findByIdAndUpdate(staff._id, {
+      $set: { lockUntil: new Date(Date.now() + LOCKOUT_DURATION_MS), failedLoginAttempts: 0 },
+    });
+    await logAudit(
+      staff,
+      "staff.locked",
+      { type: "Staff", id: staff._id },
+      { lockMinutes: LOCKOUT_DURATION_MS / 60000, trigger: reason },
+      req
+    );
+  }
+};
+
+// Accept a TOTP code at most once (replay protection). Returns true if accepted.
+const consumeTotp = async (staff, code) => {
+  const delta = authenticator.checkDelta(code, staff.mfaSecret);
+  if (delta === null || delta === undefined) return false;
+  const step = Math.floor(Date.now() / 1000 / 30) + delta;
+  const res = await Staff.updateOne(
+    { _id: staff._id, mfaLastUsedStep: { $lt: step } },
+    { $set: { mfaLastUsedStep: step } }
+  );
+  return res.modifiedCount === 1;
+};
+
+const issueSession = async (staff, req, res, { mfa }) => {
+  const { accessToken, refreshToken } = await generateStaffTokens(staff._id, { mfa });
+
+  staff.lastLoginAt = new Date();
+  staff.lastLoginIp = req.ip;
+  staff.failedLoginAttempts = 0;
+  staff.lockUntil = null;
+  await staff.save({ validateBeforeSave: false });
+
+  const loggedInStaff = staff.toObject();
+  delete loggedInStaff.password;
+  delete loggedInStaff.refreshToken;
+  delete loggedInStaff.mfaSecret;
+  delete loggedInStaff.mfaLastUsedStep;
+
+  await logAudit(staff, "staff.login", { type: "Staff", id: staff._id }, { mfa }, req);
+
+  const mfaSetupRequired =
+    staff.role === "superadmin" && !staff.mfaEnabled && process.env.REQUIRE_SUPERADMIN_MFA === "true";
+
+  return res
+    .status(200)
+    .cookie("staffAccessToken", accessToken, staffAccessCookieOptions)
+    .cookie("staffRefreshToken", refreshToken, staffRefreshCookieOptions)
+    .json(
+      new ApiResponse(
+        200,
+        { staff: loggedInStaff, mfaSetupRequired },
+        "Logged in successfully"
+      )
+    );
+};
+
 // ---- STEP 1: password login ----
 const loginStaff = asyncHandler(async (req, res) => {
   const { companyEmail, password } = req.body;
 
-  const staff = await Staff.findOne({ companyEmail }).select(
-    "+password +mfaSecret"
-  );
+  const staff = await Staff.findOne({ companyEmail }).select("+password");
 
-  if (!staff) {
+  const isLocked = staff && (typeof staff.isLocked === "function" ? staff.isLocked() : staff.isLocked);
+  if (isLocked) {
     await bcrypt.compare(password, DUMMY_HASH);
-    await logAudit(
-      { _id: null, companyEmail },
-      "staff.login_failed",
-      { type: "Staff" },
-      { reason: "invalid credentials" },
-      req
-    );
+    await logAudit(staff, "staff.login_blocked_locked", { type: "Staff", id: staff._id }, {}, req);
     throw new ApiError(401, "Invalid credentials");
   }
 
-  if (staff.isLocked) {
-    await bcrypt.compare(password, DUMMY_HASH);
-    await logAudit(
-      staff,
-      "staff.login_locked",
-      { type: "Staff", id: staff._id },
-      { reason: "account locked" },
-      req
-    );
-    throw new ApiError(401, "Invalid credentials");
-  }
+  const passwordOk = staff
+    ? await staff.isPasswordCorrect(password)
+    : (await bcrypt.compare(password, DUMMY_HASH), false);
 
-  const passwordValid = await staff.isPasswordCorrect(password);
-  if (!passwordValid) {
-    await recordFailedLogin(staff, req, "invalid password");
+  if (!staff || !passwordOk) {
+    if (staff) {
+      await registerFailure(staff, req, "invalid credentials");
+    } else {
+      await logAudit(
+        { _id: null, companyEmail },
+        "staff.login_failed",
+        { type: "Staff" },
+        { reason: "unknown email" },
+        req
+      );
+    }
     throw new ApiError(401, "Invalid credentials");
   }
 
@@ -112,148 +154,67 @@ const loginStaff = asyncHandler(async (req, res) => {
     throw new ApiError(403, "Your staff account has been deactivated");
   }
 
-  // If MFA is enabled on this staff member
   if (staff.mfaEnabled) {
-    const mfaToken = signMfaChallengeToken({
-      _id: String(staff._id),
-      companyEmail: staff.companyEmail,
-      role: staff.role,
-    });
-
-    return res.status(200).json(
-      new ApiResponse(
-        200,
-        {
-          mfaRequired: true,
-          staffId: staff._id,
-          mfaToken,
-        },
-        "MFA code required"
-      )
-    );
+    const mfaToken = signMfaChallengeToken(staff._id);
+    return res
+      .status(200)
+      .json(new ApiResponse(200, { mfaRequired: true, mfaToken }, "MFA code required"));
   }
 
-  // If superadmin MFA is enforced globally and not set up yet
-  if (staff.role === "superadmin" && process.env.REQUIRE_SUPERADMIN_MFA === "true") {
-    // Generate a setup token or require setup
-    const mfaToken = signMfaChallengeToken({
-      _id: String(staff._id),
-      companyEmail: staff.companyEmail,
-      role: staff.role,
-    });
-    return res.status(200).json(
-      new ApiResponse(
-        200,
-        {
-          mfaRequired: true,
-          mfaSetupRequired: true,
-          staffId: staff._id,
-          mfaToken,
-        },
-        "MFA setup required for superadmin account"
-      )
-    );
-  }
-
-  await resetFailedAttempts(staff);
-
-  const { accessToken, refreshToken } = await generateStaffTokens(staff._id, {
-    mfa: false,
-  });
-
-  staff.lastLoginAt = new Date();
-  staff.lastLoginIp = req.ip;
-  await staff.save({ validateBeforeSave: false });
-
-  const loggedInStaff = staff.toObject();
-  delete loggedInStaff.password;
-  delete loggedInStaff.refreshToken;
-  delete loggedInStaff.mfaSecret;
-
-  await logAudit(staff, "staff.login", { type: "Staff", id: staff._id }, {}, req);
-
-  return res
-    .status(200)
-    .cookie("staffAccessToken", accessToken, staffAccessCookieOptions)
-    .cookie("staffRefreshToken", refreshToken, staffRefreshCookieOptions)
-    .json(new ApiResponse(200, { staff: loggedInStaff }, "Logged in successfully"));
+  return issueSession(staff, req, res, { mfa: false });
 });
 
 // ---- STEP 2: TOTP verification ----
 const verifyMfaLogin = asyncHandler(async (req, res) => {
-  const { staffId, mfaToken, code } = req.body;
+  const { mfaToken, code } = req.body;
 
-  let resolvedStaffId = staffId;
-  if (mfaToken) {
-    try {
-      const claims = verifyMfaChallengeToken(mfaToken);
-      resolvedStaffId = claims._id;
-    } catch (err) {
-      throw new ApiError(401, "MFA challenge expired or invalid — please sign in again");
-    }
+  let challenge;
+  try {
+    challenge = verifyMfaChallengeToken(mfaToken);
+  } catch (err) {
+    throw new ApiError(401, "MFA session expired — please sign in again");
   }
 
-  const staff = await Staff.findById(resolvedStaffId).select("+mfaSecret");
-  if (!staff) {
-    throw new ApiError(401, "Invalid request");
+  const staff = await Staff.findById(challenge.sub || challenge._id).select("+mfaSecret");
+  if (!staff || !staff.mfaEnabled || !staff.isActive) {
+    throw new ApiError(401, "Invalid or expired code");
+  }
+  const isLocked = typeof staff.isLocked === "function" ? staff.isLocked() : staff.isLocked;
+  if (isLocked) {
+    throw new ApiError(401, "Invalid or expired code");
   }
 
-  if (staff.isLocked) {
-    throw new ApiError(401, "Account is locked — please try again later");
+  if (!(await consumeTotp(staff, code))) {
+    await registerFailure(staff, req, "invalid MFA code");
+    throw new ApiError(401, "Invalid or expired code");
   }
 
-  if (!staff.mfaEnabled || !staff.mfaSecret) {
-    throw new ApiError(400, "MFA is not enabled for this account");
-  }
-
-  // TOTP replay protection: check window step
-  const step = Math.floor(Date.now() / 30000);
-  const valid = authenticator.check(code, staff.mfaSecret);
-  if (!valid || (staff.mfaLastUsedStep && staff.mfaLastUsedStep >= step)) {
-    await recordFailedLogin(staff, req, "invalid or replayed MFA code");
-    throw new ApiError(401, "Invalid or expired MFA code");
-  }
-
-  staff.mfaLastUsedStep = step;
-  await resetFailedAttempts(staff);
-
-  const { accessToken, refreshToken } = await generateStaffTokens(staff._id, {
-    mfa: true,
-  });
-
-  staff.lastLoginAt = new Date();
-  staff.lastLoginIp = req.ip;
-  await staff.save({ validateBeforeSave: false });
-
-  const loggedInStaff = staff.toObject();
-  delete loggedInStaff.password;
-  delete loggedInStaff.refreshToken;
-  delete loggedInStaff.mfaSecret;
-
-  await logAudit(staff, "staff.login", { type: "Staff", id: staff._id }, { mfa: true }, req);
-
-  return res
-    .status(200)
-    .cookie("staffAccessToken", accessToken, staffAccessCookieOptions)
-    .cookie("staffRefreshToken", refreshToken, staffRefreshCookieOptions)
-    .json(new ApiResponse(200, { staff: loggedInStaff }, "Logged in successfully"));
+  return issueSession(staff, req, res, { mfa: true });
 });
 
 // ---- Begin MFA enrollment ----
 const setupMfa = asyncHandler(async (req, res) => {
   const staff = await Staff.findById(req.staff._id);
+  if (staff.mfaEnabled) {
+    throw new ApiError(409, "MFA is already enabled — disable it first to re-enrol");
+  }
 
   const secret = authenticator.generateSecret();
   const otpauthUrl = authenticator.keyuri(staff.companyEmail, "GreenCards Staff", secret);
   const qrCodeDataUrl = await QRCode.toDataURL(otpauthUrl);
 
-  // stored but mfaEnabled stays false until verifyMfaSetup confirms it
   staff.mfaSecret = secret;
   await staff.save({ validateBeforeSave: false });
 
   return res
     .status(200)
-    .json(new ApiResponse(200, { qrCodeDataUrl, secret }, "Scan this QR code with your authenticator app"));
+    .json(
+      new ApiResponse(
+        200,
+        { qrCodeDataUrl, secret },
+        "Scan this QR code with your authenticator app"
+      )
+    );
 });
 
 const verifyMfaSetup = asyncHandler(async (req, res) => {
@@ -264,18 +225,15 @@ const verifyMfaSetup = asyncHandler(async (req, res) => {
     throw new ApiError(400, "Call /staff/mfa/setup first");
   }
 
-  const valid = authenticator.check(code, staff.mfaSecret);
-  if (!valid) {
+  if (!(await consumeTotp(staff, code))) {
     throw new ApiError(401, "Invalid code — check your authenticator app and try again");
   }
 
   staff.mfaEnabled = true;
-  staff.mfaLastUsedStep = Math.floor(Date.now() / 30000);
   await staff.save({ validateBeforeSave: false });
 
   await logAudit(staff, "staff.mfa_enabled", { type: "Staff", id: staff._id }, {}, req);
 
-  // Issue upgraded tokens with mfa: true
   const { accessToken, refreshToken } = await generateStaffTokens(staff._id, {
     mfa: true,
   });
@@ -289,24 +247,21 @@ const verifyMfaSetup = asyncHandler(async (req, res) => {
 
 const disableMfa = asyncHandler(async (req, res) => {
   const { password, code } = req.body;
+
   const staff = await Staff.findById(req.staff._id).select("+password +mfaSecret");
-
+  if (!staff.mfaEnabled) {
+    throw new ApiError(400, "MFA is not enabled");
+  }
   if (staff.role === "superadmin" && process.env.REQUIRE_SUPERADMIN_MFA === "true") {
-    throw new ApiError(400, "MFA cannot be disabled for superadmin accounts (mandated by security policy)");
+    throw new ApiError(403, "MFA is mandatory for super admin accounts and cannot be disabled");
   }
-
-  if (!(await staff.isPasswordCorrect(password))) {
-    throw new ApiError(401, "Incorrect password");
-  }
-
-  const valid = authenticator.check(code, staff.mfaSecret);
-  if (!valid) {
-    throw new ApiError(401, "Invalid MFA code");
+  if (!(await staff.isPasswordCorrect(password)) || !(await consumeTotp(staff, code))) {
+    await registerFailure(staff, req, "invalid re-authentication for MFA disable");
+    throw new ApiError(401, "Invalid password or code");
   }
 
   staff.mfaEnabled = false;
   staff.mfaSecret = undefined;
-  staff.mfaLastUsedStep = 0;
   await staff.save({ validateBeforeSave: false });
 
   await logAudit(staff, "staff.mfa_disabled", { type: "Staff", id: staff._id }, {}, req);

@@ -16,11 +16,8 @@ const staffLoginSchema = z.object({
 });
 
 const staffMfaLoginSchema = z.object({
-  staffId: objectIdSchema.optional(),
-  mfaToken: z.string().min(10, "MFA challenge token is required").optional(),
+  mfaToken: z.string().min(20).max(2048),
   code: z.string().regex(/^\d{6}$/, "Code must be 6 digits"),
-}).refine((data) => data.mfaToken || data.staffId, {
-  message: "Either mfaToken or staffId is required",
 });
 
 const mfaVerifySetupSchema = z.object({
