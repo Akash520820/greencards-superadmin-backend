@@ -177,7 +177,7 @@ const verifySuperAdmin = asyncHandler(async (req, res, next) => {
   if (req.user?.role !== "superadmin") {
     throw new ApiError(403, "Access denied — super admin only");
   }
-  if (process.env.REQUIRE_SUPERADMIN_MFA === "true" && req.tokenClaims && req.tokenClaims.mfa !== true) {
+  if (process.env.REQUIRE_SUPERADMIN_MFA === "true" && req.tokenClaims?.mfa !== true) {
     throw new ApiError(403, "Multi-factor authentication required for superadmin actions");
   }
   next();
@@ -191,7 +191,7 @@ const verifyPermission = (permission) =>
     if (!req.isStaff || typeof req.user?.hasPermission !== "function") {
       throw new ApiError(403, "Access denied — staff only");
     }
-    if (req.user.role === "superadmin" && process.env.REQUIRE_SUPERADMIN_MFA === "true" && req.tokenClaims && req.tokenClaims.mfa !== true) {
+    if (req.user.role === "superadmin" && process.env.REQUIRE_SUPERADMIN_MFA === "true" && req.tokenClaims?.mfa !== true) {
       throw new ApiError(403, "Multi-factor authentication required for superadmin actions");
     }
     if (!req.user.hasPermission(permission)) {

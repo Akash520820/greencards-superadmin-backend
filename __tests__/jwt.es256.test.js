@@ -1,106 +1,158 @@
 const crypto = require("crypto");
 const jwt = require("jsonwebtoken");
-const {
-  signCustomerAccessToken,
-  verifyCustomerAccessToken,
-  signStaffAccessToken,
-  verifyStaffAccessToken,
-  signMfaChallengeToken,
-  verifyMfaChallengeToken,
-  calculateThumbprint,
-  readKeyFromEnv,
-} = require("../shared/utils/jwtKeys");
 
-describe("ES256 Token Signing and Verification", () => {
-  let customerKeys;
-  let staffKeys;
-  let savedEnv;
+const pair = (curve = "prime256v1") => {
+  const { privateKey, publicKey } = crypto.generateKeyPairSync("ec", { namedCurve: curve });
+  return {
+    priv: privateKey.export({ type: "pkcs8", format: "pem" }),
+    pub: publicKey.export({ type: "spki", format: "pem" }),
+  };
+};
+const b64 = (s) => Buffer.from(s).toString("base64");
 
-  beforeAll(() => {
-    savedEnv = { ...process.env };
+describe("ES256 token layer (jwtKeys)", () => {
+  let K, customer, staff, attacker;
 
-    customerKeys = crypto.generateKeyPairSync("ec", {
-      namedCurve: "prime256v1",
-      publicKeyEncoding: { type: "spki", format: "pem" },
-      privateKeyEncoding: { type: "pkcs8", format: "pem" },
+  const load = () => {
+    jest.resetModules();
+    K = require("../shared/utils/jwtKeys");
+  };
+
+  beforeEach(() => {
+    customer = pair();
+    staff = pair();
+    attacker = pair();
+    process.env.CUSTOMER_JWT_PRIVATE_KEY = b64(customer.priv);
+    process.env.CUSTOMER_JWT_PUBLIC_KEY = b64(customer.pub);
+    process.env.STAFF_JWT_PRIVATE_KEY = b64(staff.priv);
+    process.env.STAFF_JWT_PUBLIC_KEY = b64(staff.pub);
+    delete process.env.STAFF_JWT_PUBLIC_KEY_PREVIOUS;
+    delete process.env.CUSTOMER_JWT_PUBLIC_KEY_PREVIOUS;
+    load();
+  });
+
+  test("customer and staff tokens round-trip", () => {
+    const c = K.signCustomerAccessToken({ _id: "u1", role: "seller" }, "5m");
+    expect(K.verifyCustomerAccessToken(c)).toMatchObject({ _id: "u1", role: "seller" });
+    const s = K.signStaffAccessToken({ _id: "s1", role: "superadmin", mfa: true }, "5m");
+    expect(K.verifyStaffAccessToken(s)).toMatchObject({ _id: "s1", role: "superadmin", isStaff: true, mfa: true });
+  });
+
+  test("header is ES256 and carries a kid", () => {
+    const { header } = jwt.decode(K.signStaffAccessToken({ _id: "s1", role: "admin" }), { complete: true });
+    expect(header.alg).toBe("ES256");
+    expect(header.kid).toMatch(/^[0-9a-f]{16}$/);
+  });
+
+  test("a customer token can never pass as a staff token (and vice versa)", () => {
+    const c = K.signCustomerAccessToken({ _id: "u1", role: "user" });
+    expect(() => K.verifyStaffAccessToken(c)).toThrow();
+    const s = K.signStaffAccessToken({ _id: "s1", role: "admin" });
+    expect(() => K.verifyCustomerAccessToken(s)).toThrow();
+  });
+
+  test("algorithm confusion: HS256 token signed with the PUBLIC key as HMAC secret is rejected", () => {
+    const forged = jwt.sign({ _id: "s1", role: "superadmin", isStaff: true }, staff.pub, {
+      algorithm: "HS256", issuer: K.ISSUER.staff, audience: K.AUDIENCE, keyid: "x",
     });
+    expect(() => K.verifyStaffAccessToken(forged)).toThrow();
+  });
 
-    staffKeys = crypto.generateKeyPairSync("ec", {
-      namedCurve: "prime256v1",
-      publicKeyEncoding: { type: "spki", format: "pem" },
-      privateKeyEncoding: { type: "pkcs8", format: "pem" },
+  test('alg "none" is rejected', () => {
+    const h = Buffer.from(JSON.stringify({ alg: "none", typ: "JWT" })).toString("base64url");
+    const p = Buffer.from(JSON.stringify({ _id: "s1", role: "superadmin", isStaff: true, iss: K.ISSUER.staff, aud: K.AUDIENCE })).toString("base64url");
+    expect(() => K.verifyStaffAccessToken(`${h}.${p}.`)).toThrow();
+  });
+
+  test("token signed by an attacker's own EC key is rejected, even copying the real kid", () => {
+    const real = K.signStaffAccessToken({ _id: "s1", role: "admin" });
+    const kid = jwt.decode(real, { complete: true }).header.kid;
+    const forged = jwt.sign({ _id: "s1", role: "superadmin", isStaff: true }, attacker.priv, {
+      algorithm: "ES256", issuer: K.ISSUER.staff, audience: K.AUDIENCE, keyid: kid,
     });
-
-    process.env.CUSTOMER_JWT_PRIVATE_KEY = customerKeys.privateKey;
-    process.env.CUSTOMER_JWT_PUBLIC_KEY = customerKeys.publicKey;
-    process.env.STAFF_JWT_PRIVATE_KEY = staffKeys.privateKey;
-    process.env.STAFF_JWT_PUBLIC_KEY = staffKeys.publicKey;
+    expect(() => K.verifyStaffAccessToken(forged)).toThrow(/signature/i);
   });
 
-  afterAll(() => {
-    process.env = savedEnv;
+  test("wrong issuer / audience rejected", () => {
+    const badIss = jwt.sign({ _id: "s1", role: "admin", isStaff: true }, staff.priv, { algorithm: "ES256", issuer: "evil", audience: K.AUDIENCE });
+    const badAud = jwt.sign({ _id: "s1", role: "admin", isStaff: true }, staff.priv, { algorithm: "ES256", issuer: K.ISSUER.staff, audience: "other" });
+    // unknown kid is rejected first, which is also correct
+    expect(() => K.verifyStaffAccessToken(badIss)).toThrow();
+    expect(() => K.verifyStaffAccessToken(badAud)).toThrow();
   });
 
-  test("signs customer token with ES256 and correct kid, iss, aud", () => {
-    const payload = { _id: "usr_12345", email: "user@test.com", role: "user" };
-    const token = signCustomerAccessToken(payload);
-
-    const decoded = jwt.decode(token, { complete: true });
-    expect(decoded.header.alg).toBe("ES256");
-    expect(decoded.header.kid).toBe(calculateThumbprint(customerKeys.publicKey));
-    expect(decoded.payload.iss).toBe("greencards-user-backend");
-    expect(decoded.payload.aud).toBe("greencards-api");
-    expect(decoded.payload.email).toBe("user@test.com");
+  test("expired tokens throw TokenExpiredError", () => {
+    const t = K.signStaffAccessToken({ _id: "s1", role: "admin" }, "-10s");
+    let err;
+    try { K.verifyStaffAccessToken(t); } catch (e) { err = e; }
+    // middleware maps on err.name, so assert on the name (module instances differ after resetModules)
+    expect(err && err.name).toBe("TokenExpiredError");
   });
 
-  test("verifies customer token successfully with customer public key", () => {
-    const payload = { _id: "usr_12345", email: "user@test.com", role: "user" };
-    const token = signCustomerAccessToken(payload);
-
-    const verified = verifyCustomerAccessToken(token);
-    expect(verified._id).toBe("usr_12345");
-    expect(verified.email).toBe("user@test.com");
+  test("staff verifier requires isStaff and a staff role", () => {
+    const nonStaff = K.signCustomerAccessToken({ _id: "u1", role: "admin" });
+    expect(() => K.verifyStaffAccessToken(nonStaff)).toThrow();
   });
 
-  test("signs staff token with ES256 and verifies successfully", () => {
-    const payload = { _id: "stf_12345", companyEmail: "admin@greencards.com", role: "admin", isStaff: true };
-    const token = signStaffAccessToken(payload);
-
-    const decoded = jwt.decode(token, { complete: true });
-    expect(decoded.header.alg).toBe("ES256");
-    expect(decoded.header.kid).toBe(calculateThumbprint(staffKeys.publicKey));
-    expect(decoded.payload.iss).toBe("greencards-superadmin-backend");
-    expect(decoded.payload.aud).toBe("greencards-api");
-
-    const verified = verifyStaffAccessToken(token);
-    expect(verified._id).toBe("stf_12345");
-    expect(verified.isStaff).toBe(true);
+  test("customer verifier refuses a token that claims isStaff", () => {
+    const sneaky = jwt.sign({ _id: "u1", role: "user", isStaff: true }, customer.priv, {
+      algorithm: "ES256", issuer: K.ISSUER.customer, audience: K.AUDIENCE, keyid: jwt.decode(K.signCustomerAccessToken({ _id: "u1" }), { complete: true }).header.kid,
+    });
+    expect(() => K.verifyCustomerAccessToken(sneaky)).toThrow(/staff claim/);
   });
 
-  test("cross-domain isolation: customer token is rejected by verifyStaffAccessToken", () => {
-    const customerToken = signCustomerAccessToken({ _id: "usr_attacker", role: "user" });
-    expect(() => verifyStaffAccessToken(customerToken)).toThrow();
+  test("MFA challenge cannot be used as an access token, and vice versa", () => {
+    const ch = K.signMfaChallenge("s1");
+    expect(K.verifyMfaChallenge(ch).sub).toBe("s1");
+    expect(() => K.verifyStaffAccessToken(ch)).toThrow();
+    expect(() => K.verifyMfaChallenge(K.signStaffAccessToken({ _id: "s1", role: "admin" }))).toThrow();
   });
 
-  test("cross-domain isolation: staff token is rejected by verifyCustomerAccessToken", () => {
-    const staffToken = signStaffAccessToken({ _id: "stf_admin", role: "admin", isStaff: true });
-    expect(() => verifyCustomerAccessToken(staffToken)).toThrow();
+  test("a verify-only service (public keys only) cannot mint tokens", () => {
+    delete process.env.STAFF_JWT_PRIVATE_KEY;
+    delete process.env.CUSTOMER_JWT_PRIVATE_KEY;
+    load();
+    expect(() => K.signStaffAccessToken({ _id: "s1", role: "superadmin" })).toThrow(/not allowed to issue/);
+    expect(() => K.signCustomerAccessToken({ _id: "u1" })).toThrow(/not allowed to issue/);
   });
 
-  test("rejects forged token with none algorithm or invalid signature", () => {
-    const forgedHeader = Buffer.from(JSON.stringify({ alg: "none", typ: "JWT" })).toString("base64url");
-    const forgedPayload = Buffer.from(JSON.stringify({ _id: "usr_fake", iss: "greencards-user-backend", aud: "greencards-api" })).toString("base64url");
-    const forgedToken = `${forgedHeader}.${forgedPayload}.`;
-
-    expect(() => verifyCustomerAccessToken(forgedToken)).toThrow();
+  test("key rotation: tokens from the previous key verify while the new key signs", () => {
+    const oldToken = K.signStaffAccessToken({ _id: "s1", role: "admin" });
+    const next = pair();
+    process.env.STAFF_JWT_PRIVATE_KEY = b64(next.priv);
+    process.env.STAFF_JWT_PUBLIC_KEY = b64(next.pub);
+    process.env.STAFF_JWT_PUBLIC_KEY_PREVIOUS = b64(staff.pub);
+    load();
+    expect(K.verifyStaffAccessToken(oldToken)._id).toBe("s1");
+    const fresh = K.signStaffAccessToken({ _id: "s2", role: "admin" });
+    expect(K.verifyStaffAccessToken(fresh)._id).toBe("s2");
+    // once PREVIOUS is dropped, old tokens die
+    delete process.env.STAFF_JWT_PUBLIC_KEY_PREVIOUS;
+    load();
+    expect(() => K.verifyStaffAccessToken(oldToken)).toThrow(/unknown signing key/);
   });
 
-  test("signs and verifies MFA challenge token", () => {
-    const claims = { _id: "stf_mfa123", companyEmail: "superadmin@greencards.com" };
-    const token = signMfaChallengeToken(claims);
+  test("only P-256 keys are accepted (no RSA, no other curves)", () => {
+    const { privateKey } = crypto.generateKeyPairSync("rsa", { modulusLength: 2048 });
+    process.env.STAFF_JWT_PRIVATE_KEY = b64(privateKey.export({ type: "pkcs8", format: "pem" }));
+    load();
+    expect(() => K.signStaffAccessToken({ _id: "s1", role: "admin" })).toThrow(/P-256/);
+    const p384 = pair("secp384r1");
+    process.env.STAFF_JWT_PRIVATE_KEY = b64(p384.priv);
+    load();
+    expect(() => K.signStaffAccessToken({ _id: "s1", role: "admin" })).toThrow(/P-256/);
+  });
 
-    const verified = verifyMfaChallengeToken(token);
-    expect(verified._id).toBe("stf_mfa123");
-    expect(verified.aud).toBe("greencards-mfa-challenge");
+  test("raw PEM and \\n-escaped PEM are accepted as well as base64", () => {
+    process.env.STAFF_JWT_PRIVATE_KEY = staff.priv.replace(/\n/g, "\\n");
+    process.env.STAFF_JWT_PUBLIC_KEY = staff.pub;
+    load();
+    const t = K.signStaffAccessToken({ _id: "s1", role: "admin" });
+    expect(K.verifyStaffAccessToken(t)._id).toBe("s1");
+  });
+
+  test("oversized / non-string tokens are rejected before parsing", () => {
+    expect(() => K.verifyStaffAccessToken("a".repeat(5000))).toThrow();
+    expect(() => K.verifyStaffAccessToken(undefined)).toThrow();
   });
 });

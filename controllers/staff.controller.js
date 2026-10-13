@@ -295,6 +295,11 @@ const refreshStaffAccessToken = asyncHandler(async (req, res) => {
     throw new ApiError(403, "Your staff account has been deactivated");
   }
 
+  // Sessions that predate a password change cannot be refreshed.
+  if (staff.passwordChangedAt && decoded.iat * 1000 < staff.passwordChangedAt.getTime()) {
+    throw new ApiError(401, "Invalid or expired refresh token");
+  }
+
   const { accessToken, refreshToken } = await generateStaffTokens(staff._id, {
     mfa: decoded.mfa === true,
   });
@@ -324,6 +329,10 @@ const changeStaffPassword = asyncHandler(async (req, res) => {
   const { oldPassword, newPassword } = req.body;
 
   const staff = await Staff.findById(req.staff._id).select("+password");
+  if (!staff) {
+    throw new ApiError(404, "Staff member not found");
+  }
+
   if (!(await staff.isPasswordCorrect(oldPassword))) {
     throw new ApiError(401, "Current password is incorrect");
   }
@@ -334,7 +343,17 @@ const changeStaffPassword = asyncHandler(async (req, res) => {
 
   await logAudit(staff, "staff.password_change", { type: "Staff", id: staff._id }, {}, req);
 
-  return res.status(200).json(new ApiResponse(200, {}, "Password changed successfully"));
+  // Every other session / refresh token issued before now is invalid
+  // (see passwordChangedAt checks); keep THIS browser signed in with a fresh pair.
+  const { accessToken, refreshToken } = await generateStaffTokens(staff._id, {
+    mfa: req.tokenClaims?.mfa === true,
+  });
+
+  return res
+    .status(200)
+    .cookie("staffAccessToken", accessToken, staffAccessCookieOptions)
+    .cookie("staffRefreshToken", refreshToken, staffRefreshCookieOptions)
+    .json(new ApiResponse(200, {}, "Password changed successfully"));
 });
 
 // ---- SuperAdmin-only Staff Management ----

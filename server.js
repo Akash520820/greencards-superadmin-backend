@@ -7,7 +7,10 @@ const mongoose = require("mongoose");
 
 // ─── Fail-fast: required env vars ────────────────────────────────────────────
 const { assertJwtConfig } = require("./shared/utils/jwtKeys");
-assertJwtConfig();
+assertJwtConfig("greencards-superadmin-backend", {
+  issues: ["staff"],
+  verifies: ["staff", "customer"],
+});
 
 const missing = [];
 if (!process.env.MONGODB_URI) missing.push("MONGODB_URI");
@@ -18,6 +21,7 @@ if (
 ) {
   missing.push("SUPERADMIN_REFRESH_TOKEN_SECRET");
 }
+if (!process.env.INTERNAL_API_SECRET) missing.push("INTERNAL_API_SECRET");
 
 if (missing.length > 0) {
   console.error(`[superadmin-backend] Missing required environment variables: ${missing.join(", ")}`);

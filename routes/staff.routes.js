@@ -50,7 +50,7 @@ router.use(ipAllowlist);
 // ---- Auth (no session required yet) ----
 router.route("/login").post(authLimiter, validate({ body: staffLoginSchema }), loginStaff);
 router.route("/mfa/login").post(authLimiter, validate({ body: staffMfaLoginSchema }), verifyMfaLogin);
-router.route("/refresh-token").post(refreshStaffAccessToken);
+router.route("/refresh-token").post(authLimiter, refreshStaffAccessToken);
 
 // ---- Everything below requires a valid staff session ----
 router.use(verifyStaffJWT);

@@ -166,19 +166,7 @@ const verifyMfaChallengeToken = verifyMfaChallenge;
  *   issues:   ["customer"] | ["staff"] | []
  *   verifies: ["customer","staff"] ...
  */
-const assertJwtConfig = (serviceName = "service", { issues = [], verifies = [] } = {}) => {
-  // If called without second argument, infer defaults based on serviceName or env
-  if (!issues.length && !verifies.length) {
-    if (process.env.STAFF_JWT_PRIVATE_KEY) {
-      issues = ["staff"];
-      verifies = ["staff", "customer"];
-    } else if (process.env.CUSTOMER_JWT_PRIVATE_KEY) {
-      issues = ["customer"];
-      verifies = ["customer", "staff"];
-    } else {
-      verifies = ["customer", "staff"];
-    }
-  }
+const assertJwtConfig = (serviceName, { issues = [], verifies = [] }) => {
   const problems = [];
   const check = (fn) => { try { fn(); } catch (e) { problems.push(e.message); } };
   for (const d of issues) {
