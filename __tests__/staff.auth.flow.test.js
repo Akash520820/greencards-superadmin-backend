@@ -237,3 +237,90 @@ describe("staff auth flow", () => {
     });
   });
 });
+
+describe("password change", () => {
+  const NEW_PASSWORD = "Tr0ub4dor&3-Horse-Staple-Zz";
+  const refreshOf = (res) => /staffRefreshToken=([^;]+)/.exec(cookiesOf(res))?.[1];
+
+  test.each([1, 2, 3])("keeps THIS browser signed in with the fresh session (run %i)", async () => {
+    Staff.__store.clear();
+    const s = await mkStaff();
+    const login = await request(app).post("/api/v1/staff/login").send({ companyEmail: s.companyEmail, password: PASSWORD });
+    const ch = await request(app)
+      .post("/api/v1/staff/change-password")
+      .set("Cookie", `staffAccessToken=${access(login)}`)
+      .send({ oldPassword: PASSWORD, newPassword: NEW_PASSWORD });
+    expect(ch.status).toBe(200);
+    // the very next request with the freshly issued cookie must work (same-second case)
+    const next = await request(app).get("/api/v1/staff/current-staff").set("Cookie", `staffAccessToken=${access(ch)}`);
+    expect(next.status).toBe(200);
+    // and the fresh refresh token must still refresh
+    const refreshed = await request(app).post("/api/v1/staff/refresh-token").set("Cookie", `staffRefreshToken=${refreshOf(ch)}`);
+    expect(refreshed.status).toBe(200);
+  });
+
+  test("the refresh token issued before the change can no longer be used", async () => {
+    Staff.__store.clear();
+    const s = await mkStaff();
+    const login = await request(app).post("/api/v1/staff/login").send({ companyEmail: s.companyEmail, password: PASSWORD });
+    const oldRefresh = refreshOf(login);
+    // refresh tokens carry no random id, so two issued in the same second are byte-identical; wait a second
+    await new Promise((r) => setTimeout(r, 1100));
+    await request(app)
+      .post("/api/v1/staff/change-password")
+      .set("Cookie", `staffAccessToken=${access(login)}`)
+      .send({ oldPassword: PASSWORD, newPassword: NEW_PASSWORD });
+    const res = await request(app).post("/api/v1/staff/refresh-token").set("Cookie", `staffRefreshToken=${oldRefresh}`);
+    expect(res.status).toBe(401);
+  });
+
+  test("a session older than the password change is refused on refresh as well", async () => {
+    Staff.__store.clear();
+    const s = await mkStaff();
+    const login = await request(app).post("/api/v1/staff/login").send({ companyEmail: s.companyEmail, password: PASSWORD });
+    s.passwordChangedAt = new Date(Date.now() + 5000);
+    const res = await request(app).post("/api/v1/staff/refresh-token").set("Cookie", `staffRefreshToken=${refreshOf(login)}`);
+    expect(res.status).toBe(401);
+  });
+});
+
+describe("time-limited admins (createAdminDirect)", () => {
+  const DAY = 24 * 60 * 60 * 1000;
+  const refreshOf = (res) => /staffRefreshToken=([^;]+)/.exec(cookiesOf(res))?.[1];
+
+  test("an admin whose end date has passed cannot sign in, and the account is switched off", async () => {
+    Staff.__store.clear();
+    const s = await mkStaff({ role: "admin", roleExpiresAt: new Date(Date.now() - DAY) });
+    const res = await request(app).post("/api/v1/staff/login").send({ companyEmail: s.companyEmail, password: PASSWORD });
+    expect(res.status).toBe(403);
+    expect(access(res)).toBeUndefined();
+    expect(s.isActive).toBe(false);
+  });
+
+  test("an admin whose end date is in the future signs in normally", async () => {
+    Staff.__store.clear();
+    const s = await mkStaff({ role: "admin", roleExpiresAt: new Date(Date.now() + 5 * DAY) });
+    const res = await request(app).post("/api/v1/staff/login").send({ companyEmail: s.companyEmail, password: PASSWORD });
+    expect(res.status).toBe(200);
+  });
+
+  test("refresh is refused once the end date passes (admin who never touches superadmin-backend)", async () => {
+    Staff.__store.clear();
+    const s = await mkStaff({ role: "admin", roleExpiresAt: new Date(Date.now() + 5 * DAY) });
+    const login = await request(app).post("/api/v1/staff/login").send({ companyEmail: s.companyEmail, password: PASSWORD });
+    expect(login.status).toBe(200);
+    s.roleExpiresAt = new Date(Date.now() - 1000); // the end date passes while the session is open
+    const res = await request(app).post("/api/v1/staff/refresh-token").set("Cookie", `staffRefreshToken=${refreshOf(login)}`);
+    expect(res.status).toBe(403);
+    expect(s.isActive).toBe(false);
+  });
+
+  test("an elevated account whose elevation ended is reverted, not locked out", async () => {
+    Staff.__store.clear();
+    const s = await mkStaff({ role: "superadmin", previousRole: "admin", roleExpiresAt: new Date(Date.now() - 1000) });
+    const res = await request(app).post("/api/v1/staff/login").send({ companyEmail: s.companyEmail, password: PASSWORD });
+    expect(res.status).toBe(200);
+    expect(s.role).toBe("admin");
+    expect(s.isActive).toBe(true);
+  });
+});

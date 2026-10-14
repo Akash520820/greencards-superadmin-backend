@@ -29,7 +29,7 @@ const verifyStaffToken = (token) => verifyStaffAccessToken(token);
 
 // Password change / reset revokes every session issued before it.
 const rejectIfSessionPredatesPasswordChange = (staff, decoded) => {
-  if (staff.passwordChangedAt && decoded.iat * 1000 < staff.passwordChangedAt.getTime()) {
+  if (staff.passwordChangedAt && decoded.iat < Math.floor(staff.passwordChangedAt.getTime() / 1000)) {
     throw new ApiError(401, "Session expired — please sign in again");
   }
 };
@@ -220,6 +220,7 @@ const verifySellerOrAdmin = asyncHandler(async (req, res, next) => {
 });
 
 module.exports = {
+  applyJitExpiry,
   verifyJWT,
   verifyStaffJWT,
   verifyAdmin,

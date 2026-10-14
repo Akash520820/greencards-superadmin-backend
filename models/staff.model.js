@@ -140,6 +140,7 @@ staffSchema.methods.hasPermission = function (permission) {
 };
 
 const { signStaffAccessToken } = require("../shared/utils/jwtKeys");
+const { getStaffAccessTtlSeconds } = require("../shared/utils/staffTtl");
 
 staffSchema.methods.generateAccessToken = function (extraClaims = {}) {
   const claims = {
@@ -149,7 +150,7 @@ staffSchema.methods.generateAccessToken = function (extraClaims = {}) {
     isStaff: true,
     ...extraClaims,
   };
-  return signStaffAccessToken(claims);
+  return signStaffAccessToken(claims, getStaffAccessTtlSeconds());
 };
 
 staffSchema.methods.generateRefreshToken = function (extraClaims = {}) {

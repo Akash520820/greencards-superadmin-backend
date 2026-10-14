@@ -10,6 +10,8 @@ const Staff = require("../models/staff.model");
 const AuditLog = require("../models/auditLog.model");
 const { logAudit } = require("../shared/utils/auditLog.util");
 const { DEFAULT_ADMIN_PERMISSIONS } = require("../shared/constants/permissions");
+const { getStaffAccessTtlSeconds } = require("../shared/utils/staffTtl");
+const { applyJitExpiry } = require("../shared/middleware/auth.middleware");
 const {
   signMfaChallengeToken,
   verifyMfaChallengeToken,
@@ -22,10 +24,11 @@ const baseStaffCookieOptions = {
 };
 
 // maxAge (ms) MUST be kept in sync with STAFF_ACCESS_TOKEN_EXPIRY /
-// STAFF_REFRESH_TOKEN_EXPIRY in .env (currently 15m / 1d). Without maxAge,
+// STAFF_REFRESH_TOKEN_EXPIRY in .env. The access cookie now derives its maxAge
+// from STAFF_ACCESS_TOKEN_EXPIRY automatically (shared/utils/staffTtl.js). Without maxAge,
 // these are SESSION cookies and get wiped when the browser fully closes,
 // even though the JWT itself is still valid server-side.
-const staffAccessCookieOptions = { ...baseStaffCookieOptions, maxAge: 15 * 60 * 1000 }; // 15 minutes
+const staffAccessCookieOptions = { ...baseStaffCookieOptions, maxAge: getStaffAccessTtlSeconds() * 1000 }; // same value as the JWT expiry (STAFF_ACCESS_TOKEN_EXPIRY)
 const staffRefreshCookieOptions = { ...baseStaffCookieOptions, maxAge: 24 * 60 * 60 * 1000 }; // 1 day
 
 const MAX_FAILED_ATTEMPTS = 5;
@@ -154,6 +157,9 @@ const loginStaff = asyncHandler(async (req, res) => {
     throw new ApiError(403, "Your staff account has been deactivated");
   }
 
+  // Time-limited admins (createAdminDirect): refuse the sign-in once the end date has passed.
+  await applyJitExpiry(staff);
+
   if (staff.mfaEnabled) {
     const mfaToken = signMfaChallengeToken(staff._id);
     return res
@@ -183,6 +189,7 @@ const verifyMfaLogin = asyncHandler(async (req, res) => {
   if (isLocked) {
     throw new ApiError(401, "Invalid or expired code");
   }
+  await applyJitExpiry(staff);
 
   if (!(await consumeTotp(staff, code))) {
     await registerFailure(staff, req, "invalid MFA code");
@@ -295,8 +302,12 @@ const refreshStaffAccessToken = asyncHandler(async (req, res) => {
     throw new ApiError(403, "Your staff account has been deactivated");
   }
 
+  // Enforce the end date of time-limited admins here too: an admin who only uses
+  // admin-backend never reaches the superadmin middleware, so refresh is the choke point.
+  await applyJitExpiry(staff);
+
   // Sessions that predate a password change cannot be refreshed.
-  if (staff.passwordChangedAt && decoded.iat * 1000 < staff.passwordChangedAt.getTime()) {
+  if (staff.passwordChangedAt && decoded.iat < Math.floor(staff.passwordChangedAt.getTime() / 1000)) {
     throw new ApiError(401, "Invalid or expired refresh token");
   }
 
